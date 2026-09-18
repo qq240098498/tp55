@@ -10,6 +10,8 @@
     busy: false,
     result: null,
     resultView: 'structured',
+    filterText: '',
+    importSession: null,
   };
 
   const dom = {
@@ -34,6 +36,22 @@
     refreshCases: document.getElementById('refresh-cases'),
     caseDetail: document.getElementById('case-detail'),
     closeDetail: document.getElementById('close-detail'),
+    caseFilter: document.getElementById('case-filter-input'),
+    caseFilterClear: document.getElementById('case-filter-clear'),
+    exportButton: document.getElementById('export-cases'),
+    importButton: document.getElementById('import-cases'),
+    fileInput: document.getElementById('import-file-input'),
+    exportModal: document.getElementById('export-modal'),
+    exportCountHint: document.getElementById('export-count-hint'),
+    exportScopeAll: document.getElementById('export-scope-all'),
+    exportScopeVisible: document.getElementById('export-scope-visible'),
+    exportConfirm: document.getElementById('export-confirm'),
+    importModal: document.getElementById('import-modal'),
+    importPickFile: document.getElementById('import-pick-file'),
+    importFileName: document.getElementById('import-file-name'),
+    importPreview: document.getElementById('import-preview'),
+    importConfirm: document.getElementById('import-confirm'),
+    importFootHint: document.getElementById('import-foot-hint'),
   };
 
   const emptyDetailHint = '在用例列表点「详情」，这里显示该用例保存下来的目标地址、请求头与请求内容。';
@@ -85,6 +103,8 @@
     dom.saveCase.disabled = busy;
     dom.resetDraft.disabled = busy;
     dom.refreshCases.disabled = busy;
+    dom.exportButton.disabled = busy;
+    dom.importButton.disabled = busy;
     dom.sendRequest.textContent = busy && activeAction === 'send' ? '发送中…' : '发送请求';
     dom.saveCase.textContent = busy && activeAction === 'save' ? '正在保存…' : '保存为用例';
   }
@@ -566,8 +586,23 @@
     renderCases();
   }
 
+  // 当前可见的用例：筛选框为空时即全部用例；导出、列表渲染都以它为准
+  function getVisibleCases() {
+    const keyword = state.filterText.trim().toLowerCase();
+    if (!keyword) return state.cases;
+    return state.cases.filter((item) => {
+      const name = String(item.name || '').toLowerCase();
+      const url = String(item.url || '').toLowerCase();
+      return name.includes(keyword) || url.includes(keyword);
+    });
+  }
+
   function renderCases() {
-    dom.caseSummary.textContent = `共 ${state.cases.length} 条`;
+    const visible = getVisibleCases();
+    dom.caseSummary.textContent = state.filterText.trim()
+      ? `可见 ${visible.length} / 共 ${state.cases.length} 条`
+      : `共 ${state.cases.length} 条`;
+    dom.caseFilterClear.hidden = !state.filterText;
     dom.caseList.textContent = '';
 
     if (!state.cases.length) {
@@ -576,7 +611,13 @@
       );
       return;
     }
-    state.cases.forEach((item) => {
+    if (!visible.length) {
+      dom.caseList.appendChild(
+        buildEmptyBlock('没有符合筛选条件的用例', '换个关键词试试，或点「清除筛选」查看全部用例。')
+      );
+      return;
+    }
+    visible.forEach((item) => {
       dom.caseList.appendChild(buildCaseRow(item));
     });
   }
@@ -810,6 +851,658 @@
     }
   }
 
+  // ---------------- 导出与导入 ----------------
+
+  function openModal(node) {
+    node.hidden = false;
+  }
+
+  function closeModal(node) {
+    node.hidden = true;
+  }
+
+  // 导出只带走与用例内容有关的字段，编号与保存时间由导入方重新生成
+  function serializeCase(item) {
+    return {
+      name: item.name,
+      method: item.method,
+      url: item.url,
+      headers: Array.isArray(item.headers) ? item.headers : [],
+      body: typeof item.body === 'string' ? item.body : '',
+    };
+  }
+
+  function formatFileTime(date) {
+    const pad = (num) => String(num).padStart(2, '0');
+    return (
+      `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-` +
+      `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+    );
+  }
+
+  function openExportModal() {
+    if (!state.cases.length) {
+      // 一条都没有时明确说明，不生成任何文件
+      showNotice('当前一条用例都没有，没有可导出的内容，未生成导出文件', 'error');
+      return;
+    }
+    const visible = getVisibleCases();
+    dom.exportScopeAll.textContent = `共 ${state.cases.length} 条`;
+    dom.exportScopeVisible.textContent = visible.length
+      ? `当前可见 ${visible.length} 条`
+      : '当前没有可见用例（筛选无结果）';
+    const visibleRadio = dom.exportModal.querySelector('input[value="visible"]');
+    visibleRadio.disabled = visible.length === 0;
+    dom.exportModal.querySelector('input[value="all"]').checked = true;
+    updateExportConfirm();
+    openModal(dom.exportModal);
+  }
+
+  function getExportScope() {
+    const checked = dom.exportModal.querySelector('input[name="export-scope"]:checked');
+    return checked ? checked.value : 'all';
+  }
+
+  function updateExportConfirm() {
+    const scope = getExportScope();
+    const count = scope === 'visible' ? getVisibleCases().length : state.cases.length;
+    dom.exportConfirm.disabled = count === 0;
+    dom.exportCountHint.textContent = count
+      ? `本次将导出 ${count} 条用例（${scope === 'visible' ? '仅当前可见' : '全部用例'}）。`
+      : '当前可见用例为 0 条，请改选「导出全部用例」或调整筛选条件。';
+  }
+
+  function confirmExport() {
+    const scope = getExportScope();
+    const cases = scope === 'visible' ? getVisibleCases() : state.cases;
+    if (!cases.length) {
+      showNotice('所选范围内一条用例都没有，未生成导出文件', 'error');
+      return;
+    }
+
+    const exportedAt = new Date().toISOString();
+    const fileContent = {
+      format: 'api-workbench-cases',
+      version: 1,
+      exportedAt,
+      count: cases.length,
+      cases: cases.map(serializeCase),
+    };
+    const blob = new Blob([`${JSON.stringify(fileContent, null, 2)}\n`], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `cases-export-${formatFileTime(new Date())}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+
+    closeModal(dom.exportModal);
+    showNotice(
+      `已导出 ${cases.length} 条用例（${scope === 'visible' ? '仅当前可见' : '全部用例'}），文件「${link.download}」已开始下载，请在浏览器下载记录中取走`,
+      'success'
+    );
+  }
+
+  // ---- 导入：选文件 → 预览体检 → 逐条决策 → 提交 ----
+
+  function resetImportSession(extra) {
+    state.importSession = Object.assign(
+      {
+        stage: 'empty', // empty | reading | preview | read-error | preview-error | committing | done
+        fileName: '',
+        rawList: [],
+        items: [],
+        existingNames: new Set(),
+        message: '',
+        result: null,
+      },
+      extra || {}
+    );
+  }
+
+  function openImportModal() {
+    dom.fileInput.value = '';
+    resetImportSession();
+    renderImportPreview();
+    openModal(dom.importModal);
+  }
+
+  async function handleImportFile(file) {
+    resetImportSession({ stage: 'reading', fileName: file.name });
+    renderImportPreview();
+
+    let parsed = null;
+    try {
+      const text = await file.text();
+      parsed = JSON.parse(text);
+    } catch (err) {
+      resetImportSession({
+        stage: 'read-error',
+        fileName: file.name,
+        message: '文件内容不是合法的 JSON，无法作为用例导出文件读取，请重新选择文件。',
+      });
+      renderImportPreview();
+      showNotice('导入文件解析失败：内容不是合法的 JSON', 'error');
+      return;
+    }
+
+    try {
+      const preview = await request('/api/import/preview', { method: 'POST', body: parsed });
+      const rawList = Array.isArray(parsed) ? parsed : Array.isArray(parsed.cases) ? parsed.cases : [];
+      const existingNames = new Set();
+      const seenInFile = new Set();
+      const items = (preview.items || []).map((item) => {
+        if (item.exists) existingNames.add(item.name);
+        let decision;
+        if (!item.valid) {
+          decision = { mode: 'skip', targetId: '', saveAsName: '' };
+        } else if (item.exists) {
+          decision = { mode: 'overwrite', targetId: item.existing[0] ? item.existing[0].id : '', saveAsName: '' };
+        } else if (!seenInFile.has(item.name)) {
+          seenInFile.add(item.name);
+          decision = { mode: 'create', targetId: '', saveAsName: '' };
+        } else {
+          // 文件内同名、库里又不存在的多条用例，从第二条起预填一个改名建议，避免直接撞名
+          const saveAsName = suggestSaveAsName(item.name, new Set([...existingNames, ...seenInFile]), new Set());
+          seenInFile.add(saveAsName);
+          decision = { mode: 'create', targetId: '', saveAsName };
+        }
+        return Object.assign({}, item, { decision });
+      });
+      resetImportSession({
+        stage: 'preview',
+        fileName: file.name,
+        rawList,
+        items,
+        existingNames,
+      });
+      renderImportPreview();
+      showNotice(`已读取「${file.name}」：共 ${items.length} 条，请在预览中确认每条的处理方式`, 'info');
+    } catch (err) {
+      resetImportSession({
+        stage: 'preview-error',
+        fileName: file.name,
+        message: err.message || '导入预览失败，请稍后重试',
+      });
+      renderImportPreview();
+      showNotice(err.message || '导入预览失败', 'error');
+    }
+  }
+
+  // 为「另存为新用例」预填一个不与现有用例冲突的名字
+  function suggestSaveAsName(name, existingNames, usedSaveAsNames) {
+    const base = `${name}（导入副本）`;
+    let candidate = base;
+    let suffix = 2;
+    while (existingNames.has(candidate) || usedSaveAsNames.has(candidate)) {
+      candidate = `${name}（导入副本 ${suffix}）`;
+      suffix += 1;
+    }
+    return candidate;
+  }
+
+  // 汇总当前每条选择对应的处理结果与名称冲突，预览头部、底部与行内标记都用它
+  function evaluateImportPlan() {
+    const session = state.importSession;
+    const claimed = new Set(session.existingNames);
+    const plan = session.items.map((item) => {
+      const mode = item.decision.mode;
+      // 重名条目选覆盖时沿用库中名称；新建时优先使用另存为栏里的名字
+      let effectiveName = item.name;
+      if (mode === 'create') effectiveName = item.decision.saveAsName.trim() || item.name;
+      return { item, mode, effectiveName, conflict: '' };
+    });
+
+    // 第一遍只看库里已有与本次要新建的名字，第二遍把同批新建之间的重名也标出来
+    plan.forEach((row) => {
+      if (row.mode !== 'create') return;
+      if (!row.effectiveName.trim()) {
+        if (row.item.exists) row.conflict = '请填写另存为的新用例名称';
+        return;
+      }
+      if (claimed.has(row.effectiveName)) {
+        row.conflict = '该名称已被现有用例或本次其他导入条目占用';
+      } else {
+        claimed.add(row.effectiveName);
+      }
+    });
+    const secondClaimed = new Set();
+    plan.forEach((row) => {
+      if (row.mode !== 'create' || !row.effectiveName) return;
+      if (!row.conflict && secondClaimed.has(row.effectiveName)) {
+        row.conflict = '与本次导入的另一条新建用例重名';
+      }
+      secondClaimed.add(row.effectiveName);
+    });
+
+    const stats = { create: 0, overwrite: 0, skip: 0, conflicts: 0 };
+    plan.forEach((row) => {
+      stats[row.mode] += 1;
+      if (row.conflict) stats.conflicts += 1;
+    });
+    return { plan, stats };
+  }
+
+  function setImportDecision(index, patch) {
+    const session = state.importSession;
+    const item = session.items[index];
+    if (!item) return;
+    Object.assign(item.decision, patch);
+    if (patch.mode === 'create' && item.exists && !item.decision.saveAsName) {
+      const used = new Set();
+      session.items.forEach((other, otherIndex) => {
+        if (otherIndex !== index && other.exists && other.decision.mode === 'create' && other.decision.saveAsName) {
+          used.add(other.decision.saveAsName.trim());
+        }
+      });
+      item.decision.saveAsName = suggestSaveAsName(item.name, session.existingNames, used);
+    }
+    renderImportPreview();
+  }
+
+  function batchSetExisting(mode) {
+    const session = state.importSession;
+    session.items.forEach((item) => {
+      if (!item.exists || !item.valid) return;
+      item.decision.mode = mode;
+      item.decision.targetId = item.existing[0] ? item.existing[0].id : '';
+    });
+    renderImportPreview();
+  }
+
+  function resetImportDecisions() {
+    const session = state.importSession;
+    session.items.forEach((item) => {
+      if (!item.valid) {
+        item.decision = { mode: 'skip', targetId: '', saveAsName: '' };
+      } else if (item.exists) {
+        item.decision = { mode: 'overwrite', targetId: item.existing[0] ? item.existing[0].id : '', saveAsName: '' };
+      } else {
+        item.decision = { mode: 'create', targetId: '', saveAsName: '' };
+      }
+    });
+    renderImportPreview();
+  }
+
+  function renderImportPreview() {
+    const session = state.importSession;
+    dom.importPreview.textContent = '';
+    dom.importFileName.textContent = session.fileName ? `已选择文件：${session.fileName}` : '尚未选择文件';
+
+    if (session.stage === 'empty') {
+      dom.importConfirm.disabled = true;
+      dom.importFootHint.textContent = '';
+      dom.importPreview.appendChild(
+        buildEmptyBlock('还没有选择文件', '点「选择文件」挑一份此前导出的 JSON 文件，导入内容会先在这里预览，不会直接落库。')
+      );
+      return;
+    }
+    if (session.stage === 'reading') {
+      dom.importConfirm.disabled = true;
+      dom.importFootHint.textContent = '';
+      const pending = document.createElement('div');
+      pending.className = 'import-progress';
+      pending.textContent = '正在读取并检查文件内容…';
+      dom.importPreview.appendChild(pending);
+      return;
+    }
+    if (session.stage === 'read-error' || session.stage === 'preview-error') {
+      dom.importConfirm.disabled = true;
+      dom.importFootHint.textContent = '';
+      dom.importPreview.appendChild(buildFailurePanel('文件无法导入', session.message, ''));
+      return;
+    }
+    if (session.stage === 'committing') {
+      dom.importConfirm.disabled = true;
+      dom.importFootHint.textContent = '正在写入用例库…';
+      const pending = document.createElement('div');
+      pending.className = 'import-progress';
+      pending.textContent = '正在按预览中的选择导入，请稍候…';
+      dom.importPreview.appendChild(pending);
+      return;
+    }
+    if (session.stage === 'done') {
+      dom.importConfirm.disabled = true;
+      renderImportResult(session.result);
+      return;
+    }
+
+    renderImportPlan(session);
+  }
+
+  function renderImportPlan(session) {
+    const { plan, stats } = evaluateImportPlan();
+    const validCount = session.items.filter((item) => item.valid).length;
+    const invalidCount = session.items.length - validCount;
+    const existsCount = session.items.filter((item) => item.exists).length;
+    const dupFileCount = session.items.filter((item) => item.duplicateInFile).length;
+
+    const summary = document.createElement('div');
+    summary.className = 'import-summary';
+    summary.appendChild(buildImportChip(`文件内共 ${session.items.length} 条`));
+    summary.appendChild(buildImportChip(`名称已存在 ${existsCount} 条`, existsCount ? 'chip-warn' : ''));
+    summary.appendChild(buildImportChip(`文件内重名 ${dupFileCount} 条`, dupFileCount ? 'chip-info' : ''));
+    summary.appendChild(buildImportChip(`内容不成立 ${invalidCount} 条`, invalidCount ? 'chip-bad' : ''));
+    dom.importPreview.appendChild(summary);
+
+    if (existsCount) {
+      const batch = document.createElement('div');
+      batch.className = 'import-batch';
+      const hint = buildTextNote('对名称已存在的用例批量选择：');
+      const allOverwrite = document.createElement('button');
+      allOverwrite.type = 'button';
+      allOverwrite.className = 'btn btn-small';
+      allOverwrite.textContent = '全部覆盖';
+      allOverwrite.addEventListener('click', () => batchSetExisting('overwrite'));
+      const allSkip = document.createElement('button');
+      allSkip.type = 'button';
+      allSkip.className = 'btn btn-small';
+      allSkip.textContent = '全部跳过';
+      allSkip.addEventListener('click', () => batchSetExisting('skip'));
+      const reset = document.createElement('button');
+      reset.type = 'button';
+      reset.className = 'btn btn-ghost btn-small';
+      reset.textContent = '恢复默认';
+      reset.addEventListener('click', resetImportDecisions);
+      batch.append(hint, allOverwrite, allSkip, reset);
+      dom.importPreview.appendChild(batch);
+    }
+
+    if (!session.items.length) {
+      dom.importPreview.appendChild(
+        buildEmptyBlock('文件里一条用例都没有', '这份文件不包含任何用例，请确认选择的是完整的用例导出文件。')
+      );
+      dom.importConfirm.disabled = true;
+      dom.importFootHint.textContent = '没有可导入的内容';
+      return;
+    }
+
+    const list = document.createElement('div');
+    list.className = 'import-list';
+    plan.forEach((row) => list.appendChild(buildImportItem(row)));
+    dom.importPreview.appendChild(list);
+
+    const nothingToDo = stats.create + stats.overwrite === 0;
+    dom.importConfirm.disabled = stats.conflicts > 0 || nothingToDo;
+    if (stats.conflicts > 0) {
+      dom.importFootHint.textContent = `有 ${stats.conflicts} 条「另存为新用例」的名称为空或重名，请改名后再导入`;
+    } else if (nothingToDo) {
+      dom.importFootHint.textContent = '当前全部选择跳过，没有需要写入的用例';
+    } else {
+      dom.importFootHint.textContent =
+        `将新增 ${stats.create} 条、覆盖 ${stats.overwrite} 条、跳过 ${stats.skip} 条`;
+    }
+  }
+
+  function buildImportChip(text, extraClass) {
+    const chip = document.createElement('span');
+    chip.className = extraClass ? `chip ${extraClass}` : 'chip';
+    chip.textContent = text;
+    return chip;
+  }
+
+  function buildImportItem(row) {
+    const item = row.item;
+    const wrap = document.createElement('div');
+    wrap.className = 'import-item';
+
+    const top = document.createElement('div');
+    top.className = 'import-item-top';
+
+    const info = document.createElement('div');
+    info.className = 'import-item-info';
+
+    const title = document.createElement('div');
+    title.className = 'case-title';
+    title.append(
+      buildTag(item.method || 'GET', String(item.method || 'GET').toLowerCase()),
+      buildImportNameNode(item)
+    );
+
+    const urlNode = document.createElement('p');
+    urlNode.className = 'import-item-url';
+    urlNode.textContent = item.url || '（缺少目标地址）';
+
+    const flags = document.createElement('div');
+    flags.className = 'import-item-flags';
+    if (!item.valid) flags.appendChild(buildImportFlag('内容不成立，只能跳过', 'invalid'));
+    if (item.exists) flags.appendChild(buildImportFlag('名称已存在', 'exists'));
+    if (item.duplicateInFile) flags.appendChild(buildImportFlag('文件内还有同名条目', 'dupfile'));
+    if (!item.exists && item.valid) flags.appendChild(buildImportFlag('新用例', 'new'));
+    flags.appendChild(buildImportFlag(decisionLabel(row), row.mode === 'skip' ? '' : 'new'));
+
+    info.append(title, urlNode, flags);
+
+    const actions = document.createElement('div');
+    actions.className = 'import-item-actions';
+    if (!item.valid) {
+      actions.appendChild(buildChoiceButton('跳过', true, true, () => {}));
+    } else if (item.exists) {
+      actions.appendChild(
+        buildChoiceButton('覆盖已有', row.mode === 'overwrite', false, () => {
+          setImportDecision(item.index, { mode: 'overwrite' });
+        })
+      );
+      actions.appendChild(
+        buildChoiceButton('另存为新用例', row.mode === 'create', false, () => {
+          setImportDecision(item.index, { mode: 'create' });
+        })
+      );
+      actions.appendChild(
+        buildChoiceButton('跳过', row.mode === 'skip', false, () => {
+          setImportDecision(item.index, { mode: 'skip' });
+        })
+      );
+    } else {
+      actions.appendChild(
+        buildChoiceButton('新增', row.mode === 'create', false, () => {
+          setImportDecision(item.index, { mode: 'create' });
+        })
+      );
+      actions.appendChild(
+        buildChoiceButton('跳过', row.mode === 'skip', false, () => {
+          setImportDecision(item.index, { mode: 'skip' });
+        })
+      );
+    }
+
+    top.append(info, actions);
+    wrap.appendChild(top);
+
+    if (!item.valid) {
+      const errors = document.createElement('ul');
+      errors.className = 'import-item-errors';
+      item.errors.forEach((error) => {
+        const line = document.createElement('li');
+        line.textContent = error.message;
+        errors.appendChild(line);
+      });
+      wrap.appendChild(errors);
+    }
+
+    // 重名库用例选「另存为」时显示改名栏；文件内同名的新用例也允许直接改名字
+    if (row.mode === 'create' && (item.exists || item.decision.saveAsName || row.conflict)) {
+      wrap.appendChild(buildSaveAsRow(item, row));
+    }
+    return wrap;
+  }
+
+  function buildImportNameNode(item) {
+    // 不成立的条目可能连名称都没有，给一个占位文本保证行内仍然可辨认
+    const nameNode = document.createElement('span');
+    nameNode.className = 'import-item-name';
+    nameNode.textContent = item.name || '（缺少用例名称）';
+    return nameNode;
+  }
+
+  function decisionLabel(row) {
+    if (row.mode === 'overwrite') return '将覆盖已有用例';
+    if (row.mode === 'create') return row.item.exists ? '将另存为新用例' : '将新增为用例';
+    return '将跳过';
+  }
+
+  function buildImportFlag(text, kind) {
+    const flag = document.createElement('span');
+    flag.className = `flag flag-${kind || 'new'}`;
+    flag.textContent = text;
+    return flag;
+  }
+
+  function buildChoiceButton(text, active, disabled, onClick) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = active ? 'choice-btn active' : 'choice-btn';
+    button.textContent = text;
+    button.disabled = disabled;
+    button.addEventListener('click', onClick);
+    return button;
+  }
+
+  function buildSaveAsRow(item, row) {
+    const wrap = document.createElement('div');
+    wrap.className = 'import-saveas';
+
+    const line = document.createElement('div');
+    line.className = 'import-saveas-line';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = item.decision.saveAsName;
+    input.maxLength = 60;
+    input.autocomplete = 'off';
+    input.dataset.index = String(item.index);
+    input.setAttribute('aria-label', `用例「${item.name}」另存为的新名称`);
+    if (row.conflict) input.classList.add('invalid');
+    input.addEventListener('input', () => {
+      item.decision.saveAsName = input.value;
+      const cursor = input.selectionStart;
+      renderImportPreview();
+      // 重新渲染后焦点会丢失，按条目编号找回同一个输入框并还原光标位置
+      const refocused = dom.importPreview.querySelector(
+        `.import-saveas input[data-index="${item.index}"]`
+      );
+      if (refocused) {
+        refocused.focus();
+        const pos = Math.min(Number(cursor) || 0, refocused.value.length);
+        refocused.setSelectionRange(pos, pos);
+      }
+    });
+
+    const skipButton = document.createElement('button');
+    skipButton.type = 'button';
+    skipButton.className = 'btn btn-ghost btn-small';
+    skipButton.textContent = '改为跳过';
+    skipButton.addEventListener('click', () => setImportDecision(item.index, { mode: 'skip' }));
+
+    line.append(input, skipButton);
+    wrap.appendChild(line);
+    if (row.conflict) {
+      const warn = document.createElement('p');
+      warn.className = 'field-error';
+      warn.hidden = false;
+      warn.textContent = row.conflict;
+      wrap.appendChild(warn);
+    }
+    return wrap;
+  }
+
+  async function confirmImport() {
+    const session = state.importSession;
+    if (!session || session.stage !== 'preview') return;
+    const { stats } = evaluateImportPlan();
+    if (stats.conflicts || stats.create + stats.overwrite === 0) return;
+
+    const payload = {
+      cases: session.items.map((item, index) => {
+        const raw = session.rawList[index] && typeof session.rawList[index] === 'object'
+          ? session.rawList[index]
+          : {};
+        const decision = item.decision;
+        if (decision.mode === 'skip') {
+          return { name: item.name || raw.name || '', action: 'skip' };
+        }
+        if (decision.mode === 'overwrite') {
+          return Object.assign({}, raw, { action: 'overwrite', targetId: decision.targetId });
+        }
+        const finalName = decision.saveAsName.trim() || item.name;
+        return Object.assign({}, raw, { name: finalName, action: 'create' });
+      }),
+    };
+
+    resetImportSession({ stage: 'committing', fileName: session.fileName });
+    renderImportPreview();
+    try {
+      const result = await request('/api/import/commit', { method: 'POST', body: payload });
+      const done = Object.assign({}, state.importSession, { stage: 'done', result });
+      state.importSession = done;
+      renderImportPreview();
+      const c = result.counts || {};
+      showNotice(
+        `导入完成：新增 ${c.created || 0} 条，覆盖 ${c.overwritten || 0} 条，跳过 ${c.skipped || 0} 条，失败 ${c.failed || 0} 条`,
+        c.failed ? 'error' : 'success'
+      );
+      try {
+        await loadCases();
+      } catch (err) {
+        showNotice(err.message, 'error');
+      }
+    } catch (err) {
+      resetImportSession({
+        stage: 'preview-error',
+        fileName: session.fileName,
+        message: err.message || '导入失败，请稍后重试',
+      });
+      renderImportPreview();
+      showNotice(err.message || '导入失败', 'error');
+    }
+  }
+
+  function renderImportResult(result) {
+    const counts = (result && result.counts) || { created: 0, overwritten: 0, skipped: 0, failed: 0 };
+    const summary = document.createElement('div');
+    summary.className = 'import-summary';
+    summary.appendChild(buildImportChip(`新增 ${counts.created} 条`, ''));
+    summary.appendChild(buildImportChip(`覆盖 ${counts.overwritten} 条`, ''));
+    summary.appendChild(buildImportChip(`跳过 ${counts.skipped} 条`, ''));
+    summary.appendChild(buildImportChip(`失败 ${counts.failed} 条`, counts.failed ? 'chip-bad' : ''));
+    dom.importPreview.appendChild(summary);
+
+    const results = (result && result.results) || [];
+    if (!results.length) {
+      dom.importFootHint.textContent = '本次导入没有写入任何用例';
+      return;
+    }
+    const list = document.createElement('div');
+    list.className = 'import-list';
+    results.forEach((row) => {
+      const line = document.createElement('div');
+      line.className = 'import-item';
+      const head = document.createElement('div');
+      head.className = 'case-title';
+      const label = { create: '新增', overwrite: '覆盖', skip: '跳过' }[row.action] || row.action;
+      const kind = row.ok ? (row.action === 'skip' ? 'new' : 'exists') : 'invalid';
+      head.appendChild(buildImportFlag(row.ok ? `${label}成功` : `${label}失败`, kind));
+      const name = document.createElement('span');
+      name.className = 'import-item-name';
+      name.textContent = row.name || '（未命名条目）';
+      head.appendChild(name);
+      line.appendChild(head);
+      if (!row.ok) {
+        const reason = document.createElement('p');
+        reason.className = 'import-item-errors';
+        reason.textContent = row.message || '导入失败';
+        line.appendChild(reason);
+      }
+      list.appendChild(line);
+    });
+    dom.importPreview.appendChild(list);
+    dom.importFootHint.textContent = '导入结果以服务端实际写入为准；关闭窗口后可在用例区查看。';
+  }
+
   // ---------------- 结果区小零件 ----------------
 
   function buildSection(title) {
@@ -969,6 +1662,62 @@
       state.selectedId = '';
       renderCases();
       renderEmptyDetail();
+    });
+
+    dom.caseFilter.addEventListener('input', () => {
+      state.filterText = dom.caseFilter.value;
+      renderCases();
+    });
+
+    dom.caseFilterClear.addEventListener('click', () => {
+      dom.caseFilter.value = '';
+      state.filterText = '';
+      renderCases();
+      dom.caseFilter.focus();
+    });
+
+    dom.exportButton.addEventListener('click', openExportModal);
+    dom.importButton.addEventListener('click', openImportModal);
+
+    dom.exportConfirm.addEventListener('click', confirmExport);
+    dom.importConfirm.addEventListener('click', confirmImport);
+    dom.importPickFile.addEventListener('click', () => {
+      // 先清空已选值，否则再次选择同一个文件不会触发 change
+      dom.fileInput.value = '';
+      dom.fileInput.click();
+    });
+    dom.fileInput.addEventListener('change', () => {
+      const file = dom.fileInput.files && dom.fileInput.files[0];
+      if (file) handleImportFile(file);
+    });
+
+    // 单选范围切换时同步导出按钮文案与提示
+    dom.exportModal.querySelectorAll('input[name="export-scope"]').forEach((radio) => {
+      radio.addEventListener('change', updateExportConfirm);
+    });
+
+    // 点遮罩空白处或按 Esc 可以关闭弹窗；导入进行中不允许直接关掉
+    document.querySelectorAll('[data-close-modal]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const target = document.getElementById(button.dataset.closeModal);
+        if (target) closeModal(target);
+      });
+    });
+    dom.exportModal.addEventListener('click', (event) => {
+      if (event.target === dom.exportModal) closeModal(dom.exportModal);
+    });
+    dom.importModal.addEventListener('click', (event) => {
+      const session = state.importSession;
+      if (event.target === dom.importModal && (!session || session.stage !== 'committing')) {
+        closeModal(dom.importModal);
+      }
+    });
+    window.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (!dom.exportModal.hidden) closeModal(dom.exportModal);
+      if (!dom.importModal.hidden && state.importSession && state.importSession.stage !== 'committing') {
+        closeModal(dom.importModal);
+      }
     });
   }
 

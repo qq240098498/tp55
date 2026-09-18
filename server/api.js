@@ -179,6 +179,221 @@ function deleteCase(id) {
   return { id: removed.id, name: removed.name };
 }
 
+// ---------------- 导入 / 导出 ----------------
+
+const MAX_IMPORT_COUNT = 500;
+
+// 导入文件允许三种形状：直接就是用例数组、{ cases: [...] } 的导出文件，或 { items: [...] }
+function extractImportItems(payload) {
+  const input = payload && typeof payload === 'object' ? payload : {};
+  const list = Array.isArray(input)
+    ? input
+    : Array.isArray(input.cases)
+      ? input.cases
+      : Array.isArray(input.items)
+        ? input.items
+        : null;
+  if (!list) {
+    throw new ApiError(400, 'IMPORT_SHAPE_INVALID', '没有找到用例列表，请确认选择的是用例导出文件', '');
+  }
+  if (list.length > MAX_IMPORT_COUNT) {
+    throw new ApiError(400, 'IMPORT_TOO_MANY', `单次最多导入 ${MAX_IMPORT_COUNT} 条用例，请拆分后再导入`, '');
+  }
+  return list;
+}
+
+// 逐条体检：一条用例可能同时有多处问题，尽量一次性全部收集回来给预览展示
+function checkImportItem(raw) {
+  const input = raw && typeof raw === 'object' ? raw : {};
+  const errors = [];
+
+  let name = '';
+  try {
+    name = validateName(input.name);
+  } catch (err) {
+    errors.push({ field: 'name', message: err.message });
+  }
+
+  let method = 'GET';
+  let methodOk = false;
+  try {
+    method = validateMethod(input.method);
+    methodOk = true;
+  } catch (err) {
+    errors.push({ field: 'method', message: err.message });
+  }
+
+  let url = '';
+  try {
+    url = validateUrl(input.url);
+  } catch (err) {
+    errors.push({ field: 'url', message: err.message });
+  }
+
+  let headers = [];
+  try {
+    headers = validateHeaders(input.headers);
+  } catch (err) {
+    errors.push({ field: 'headers', message: err.message });
+  }
+
+  // 请求方式本身不成立时，再按它去校验请求内容只会产生干扰性的报错
+  let body = '';
+  if (methodOk) {
+    try {
+      body = validateBody(input.body, method, headers);
+    } catch (err) {
+      errors.push({ field: 'body', message: err.message });
+    }
+  }
+
+  return { name, draft: { method, url, headers, body }, errors };
+}
+
+// 导入预览：不写任何数据，只回答三件事——内容是否成立、名称是否已存在、文件内是否重名
+function previewImportCases(payload) {
+  const items = extractImportItems(payload);
+  const data = load();
+
+  const nameCounts = new Map();
+  items.forEach((raw) => {
+    const name = pickText(raw && raw.name);
+    if (name) nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+  });
+
+  const results = items.map((raw, index) => {
+    const checked = checkImportItem(raw);
+    const matches = checked.name
+      ? data.cases.filter((item) => item.name === checked.name)
+      : [];
+    return {
+      index,
+      name: checked.name,
+      method: checked.draft.method,
+      url: checked.draft.url,
+      valid: checked.errors.length === 0,
+      errors: checked.errors,
+      duplicateInFile: checked.name ? nameCounts.get(checked.name) > 1 : false,
+      exists: matches.length > 0,
+      existing: matches.map((item) => ({
+        id: item.id,
+        name: item.name,
+        updatedAt: item.updatedAt,
+      })),
+    };
+  });
+
+  return { total: results.length, items: results };
+}
+
+// 按预览时做出的选择落库：create 新增、overwrite 按名称对应的用例覆盖、skip 跳过
+function commitImportCases(payload) {
+  const items = extractImportItems(payload);
+  const data = load();
+
+  const takenNames = new Set(data.cases.map((item) => item.name));
+  const results = [];
+  const counts = { created: 0, overwritten: 0, skipped: 0, failed: 0 };
+  let changed = false;
+
+  const finish = (result, key) => {
+    counts[key] += 1;
+    results.push(result);
+  };
+
+  items.forEach((raw, index) => {
+    const input = raw && typeof raw === 'object' ? raw : {};
+    const action = pickText(input.action) || 'skip';
+    const fallbackName = pickText(input.name);
+
+    if (action === 'skip') {
+      finish({ index, action: 'skip', ok: true, name: fallbackName, message: '已跳过' }, 'skipped');
+      return;
+    }
+
+    const checked = checkImportItem(input);
+    if (checked.errors.length) {
+      finish(
+        {
+          index,
+          action,
+          ok: false,
+          name: checked.name,
+          message: checked.errors.map((item) => item.message).join('；'),
+        },
+        'failed'
+      );
+      return;
+    }
+
+    if (action === 'create') {
+      if (takenNames.has(checked.name)) {
+        finish(
+          {
+            index,
+            action,
+            ok: false,
+            name: checked.name,
+            message: '名称与已有用例重复，请选择覆盖已有用例或另存为新用例',
+          },
+          'failed'
+        );
+        return;
+      }
+      const now = new Date().toISOString();
+      const created = {
+        id: crypto.randomUUID(),
+        name: checked.name,
+        method: checked.draft.method,
+        url: checked.draft.url,
+        headers: checked.draft.headers,
+        body: checked.draft.body,
+        createdAt: now,
+        updatedAt: now,
+      };
+      data.cases.push(created);
+      takenNames.add(created.name);
+      changed = true;
+      finish({ index, action: 'create', ok: true, id: created.id, name: created.name }, 'created');
+      return;
+    }
+
+    if (action === 'overwrite') {
+      const targetId = pickText(input.targetId);
+      const target = data.cases.find((item) => item.id === targetId);
+      if (!target) {
+        finish(
+          {
+            index,
+            action,
+            ok: false,
+            name: checked.name,
+            message: '要覆盖的用例不存在，可能在预览期间被删除，请重新导入预览',
+          },
+          'failed'
+        );
+        return;
+      }
+      target.method = checked.draft.method;
+      target.url = checked.draft.url;
+      target.headers = checked.draft.headers;
+      target.body = checked.draft.body;
+      target.updatedAt = new Date().toISOString();
+      changed = true;
+      finish({ index, action: 'overwrite', ok: true, id: target.id, name: target.name }, 'overwritten');
+      return;
+    }
+
+    finish(
+      { index, action, ok: false, name: fallbackName, message: `不支持的导入处理方式：${action}` },
+      'failed'
+    );
+  });
+
+  if (changed) save(data);
+  return { counts, results };
+}
+
 module.exports = {
   ApiError,
   ALLOWED_METHODS,
@@ -187,4 +402,6 @@ module.exports = {
   getCase,
   createCase,
   deleteCase,
+  previewImportCases,
+  commitImportCases,
 };

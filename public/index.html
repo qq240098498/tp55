@@ -104,8 +104,14 @@
           <h2>用例区</h2>
           <div class="panel-head-right">
             <span class="counter" id="case-summary">共 0 条</span>
+            <button type="button" class="btn btn-ghost btn-small" id="export-cases">导出</button>
+            <button type="button" class="btn btn-small" id="import-cases">导入</button>
             <button type="button" class="btn btn-ghost btn-small" id="refresh-cases">刷新列表</button>
           </div>
+        </div>
+        <div class="case-filter">
+          <input id="case-filter-input" type="text" placeholder="按名称或目标地址筛选，导出时可只导出当前可见的用例" autocomplete="off" />
+          <button type="button" class="btn btn-ghost btn-small" id="case-filter-clear" hidden>清除筛选</button>
         </div>
         <div class="case-list" id="case-list"></div>
       </section>
@@ -121,6 +127,60 @@
       </section>
     </div>
   </main>
+
+  <input type="file" id="import-file-input" accept=".json,application/json" hidden />
+
+  <div class="modal-mask" id="export-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
+      <div class="modal-head">
+        <h3 id="export-modal-title">导出用例</h3>
+        <button type="button" class="btn btn-ghost btn-small" data-close-modal="export-modal">关闭</button>
+      </div>
+      <div class="modal-body">
+        <p class="text-note" id="export-count-hint"></p>
+        <label class="choice-row">
+          <input type="radio" name="export-scope" value="all" />
+          <span>
+            <span class="choice-title">导出全部用例</span>
+            <span class="choice-sub" id="export-scope-all">共 0 条</span>
+          </span>
+        </label>
+        <label class="choice-row">
+          <input type="radio" name="export-scope" value="visible" />
+          <span>
+            <span class="choice-title">只导出当前可见的用例</span>
+            <span class="choice-sub" id="export-scope-visible">共 0 条</span>
+          </span>
+        </label>
+        <p class="field-hint">导出为一份 JSON 文件，可直接用这份文件在别处导入。</p>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close-modal="export-modal">取消</button>
+        <button type="button" class="btn btn-primary" id="export-confirm">导出并下载文件</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-mask" id="import-modal" hidden>
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="import-modal-title">
+      <div class="modal-head">
+        <h3 id="import-modal-title">导入用例</h3>
+        <button type="button" class="btn btn-ghost btn-small" data-close-modal="import-modal">关闭</button>
+      </div>
+      <div class="modal-body">
+        <div class="import-toolbar">
+          <button type="button" class="btn btn-small" id="import-pick-file">选择文件</button>
+          <span class="text-note" id="import-file-name">尚未选择文件</span>
+        </div>
+        <div id="import-preview"></div>
+      </div>
+      <div class="modal-foot">
+        <span class="text-note" id="import-foot-hint"></span>
+        <button type="button" class="btn" data-close-modal="import-modal">取消</button>
+        <button type="button" class="btn btn-primary" id="import-confirm" disabled>开始导入</button>
+      </div>
+    </div>
+  </div>
 
   <script src="./app.js"></script>
 </body>

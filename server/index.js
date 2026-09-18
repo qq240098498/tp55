@@ -63,6 +63,24 @@ app.delete('/api/cases/:id', (req, res) => {
   }
 });
 
+// 导入预览：只读检查，不落库，页面据此展示总数、重名与不成立条目
+app.post('/api/import/preview', (req, res) => {
+  try {
+    res.json(api.previewImportCases(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// 导入提交：按页面上逐条选定的方式（新增/覆盖/跳过）落库
+app.post('/api/import/commit', (req, res) => {
+  try {
+    res.json(api.commitImportCases(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 // 内置示例接口，供页面在不填外部地址的情况下试出发送效果
 demos.mount(app);
 
