@@ -2,6 +2,7 @@
   'use strict';
 
   // 页面状态：用例列表、内置示例接口、请求头草稿行、最近一次响应结果与结果视图
+  // filter 是用例区的筛选词；importData 保存一次导入会话的解析结果与逐条选择
   const state = {
     cases: [],
     selectedId: '',
@@ -10,6 +11,10 @@
     busy: false,
     result: null,
     resultView: 'structured',
+    filter: '',
+    exporting: false,
+    importing: false,
+    importData: null,
   };
 
   const dom = {
@@ -32,13 +37,39 @@
     caseList: document.getElementById('case-list'),
     caseSummary: document.getElementById('case-summary'),
     refreshCases: document.getElementById('refresh-cases'),
+    caseFilter: document.getElementById('case-filter'),
+    exportCases: document.getElementById('export-cases'),
+    importCases: document.getElementById('import-cases'),
     caseDetail: document.getElementById('case-detail'),
     closeDetail: document.getElementById('close-detail'),
+    exportModal: document.getElementById('export-modal'),
+    exportAllCount: document.getElementById('export-all-count'),
+    exportVisibleCount: document.getElementById('export-visible-count'),
+    exportHint: document.getElementById('export-hint'),
+    exportError: document.getElementById('export-error'),
+    exportConfirm: document.getElementById('export-confirm'),
+    exportCancel: document.getElementById('export-cancel'),
+    exportClose: document.getElementById('export-close'),
+    importModal: document.getElementById('import-modal'),
+    importFile: document.getElementById('import-file'),
+    importFileError: document.getElementById('import-file-error'),
+    importStepFile: document.getElementById('import-step-file'),
+    importStepPreview: document.getElementById('import-step-preview'),
+    importSummary: document.getElementById('import-summary'),
+    importRows: document.getElementById('import-rows'),
+    importPlan: document.getElementById('import-plan'),
+    importConfirm: document.getElementById('import-confirm'),
+    importRepick: document.getElementById('import-repick'),
+    importCancel: document.getElementById('import-cancel'),
+    importClose: document.getElementById('import-close'),
   };
 
   const emptyDetailHint = '在用例列表点「详情」，这里显示该用例保存下来的目标地址、请求头与请求内容。';
   // 结构化视图最多铺开的层级条目数量，避免内容过大时页面卡顿
   const TREE_LIMIT = 800;
+  // 与服务端保持一致：单次导入的条目数与文件大小上限
+  const IMPORT_MAX_CASES = 200;
+  const IMPORT_MAX_FILE_BYTES = 20 * 1024 * 1024;
   let noticeTimer = 0;
 
   // ---------------- 后端交互 ----------------
@@ -85,6 +116,8 @@
     dom.saveCase.disabled = busy;
     dom.resetDraft.disabled = busy;
     dom.refreshCases.disabled = busy;
+    dom.exportCases.disabled = busy;
+    dom.importCases.disabled = busy;
     dom.sendRequest.textContent = busy && activeAction === 'send' ? '发送中…' : '发送请求';
     dom.saveCase.textContent = busy && activeAction === 'save' ? '正在保存…' : '保存为用例';
   }
@@ -566,8 +599,25 @@
     renderCases();
   }
 
+  // 筛选匹配：名称、地址、请求方式任一包含关键词即算命中
+  function caseMatches(item, query) {
+    return item.name.toLowerCase().includes(query)
+      || item.url.toLowerCase().includes(query)
+      || String(item.method).toLowerCase().includes(query);
+  }
+
+  // 当前可见的用例：设置了筛选词时按名称、地址、请求方式匹配，否则就是全部
+  function visibleCases() {
+    const query = state.filter.trim().toLowerCase();
+    if (!query) return state.cases;
+    return state.cases.filter((item) => caseMatches(item, query));
+  }
+
   function renderCases() {
-    dom.caseSummary.textContent = `共 ${state.cases.length} 条`;
+    const visible = visibleCases();
+    dom.caseSummary.textContent = state.filter.trim()
+      ? `显示 ${visible.length} / 共 ${state.cases.length} 条`
+      : `共 ${state.cases.length} 条`;
     dom.caseList.textContent = '';
 
     if (!state.cases.length) {
@@ -576,7 +626,13 @@
       );
       return;
     }
-    state.cases.forEach((item) => {
+    if (!visible.length) {
+      dom.caseList.appendChild(
+        buildEmptyBlock('没有符合筛选条件的用例', '换个关键词试试，或清空筛选框查看全部。')
+      );
+      return;
+    }
+    visible.forEach((item) => {
       dom.caseList.appendChild(buildCaseRow(item));
     });
   }
@@ -810,6 +866,396 @@
     }
   }
 
+  // ---------------- 导出 ----------------
+
+  function exportScope() {
+    const checked = document.querySelector('input[name="export-scope"]:checked');
+    return checked && checked.value === 'visible' ? 'visible' : 'all';
+  }
+
+  function openExportModal() {
+    const visible = visibleCases().length;
+    dom.exportAllCount.textContent = `（共 ${state.cases.length} 条）`;
+    dom.exportVisibleCount.textContent = state.filter.trim()
+      ? `（当前筛选下 ${visible} 条）`
+      : `（未设置筛选，即全部 ${visible} 条）`;
+    document.querySelector('input[name="export-scope"][value="all"]').checked = true;
+    updateExportConfirm();
+    dom.exportModal.hidden = false;
+  }
+
+  function closeExportModal() {
+    if (state.exporting) return;
+    dom.exportModal.hidden = true;
+  }
+
+  // 所选范围内一条都没有时不允许导出，直接在弹窗里说明，而不是生成一份空文件
+  function updateExportConfirm() {
+    const scope = exportScope();
+    const count = scope === 'visible' ? visibleCases().length : state.cases.length;
+    dom.exportConfirm.disabled = count === 0;
+    if (count === 0) {
+      dom.exportError.textContent = scope === 'visible' && state.filter.trim()
+        ? '当前筛选条件下没有可见用例，无法导出'
+        : '用例库还是空的，没有可导出的用例';
+      dom.exportError.hidden = false;
+    } else {
+      dom.exportError.hidden = true;
+    }
+  }
+
+  function exportFileName() {
+    const now = new Date();
+    const pad = (num) => String(num).padStart(2, '0');
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+      + `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    return `用例导出-${stamp}.json`;
+  }
+
+  // 导出内容只保留用例本身的字段，文件可读、可手工编辑，也能再导入回来
+  function buildExportPayload(cases, scope) {
+    return {
+      kind: 'tp55-case-export',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      scope,
+      count: cases.length,
+      cases: cases.map((item) => ({
+        name: item.name,
+        method: item.method,
+        url: item.url,
+        headers: item.headers.map((row) => ({ key: row.key, value: row.value })),
+        body: item.body,
+      })),
+    };
+  }
+
+  function downloadTextFile(filename, text) {
+    const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function runExport() {
+    if (state.exporting) return;
+    const scope = exportScope();
+    state.exporting = true;
+    dom.exportConfirm.disabled = true;
+    dom.exportCancel.disabled = true;
+    dom.exportConfirm.textContent = '正在导出…';
+    try {
+      // 导出前重新拉一次，保证文件内容是用例库的最新状态
+      const list = await request('/api/cases');
+      const all = Array.isArray(list) ? list : [];
+      const query = state.filter.trim().toLowerCase();
+      const picked = scope === 'visible' && query
+        ? all.filter((item) => caseMatches(item, query))
+        : all;
+      if (!picked.length) {
+        dom.exportModal.hidden = true;
+        showNotice(
+          scope === 'visible' && query
+            ? '当前筛选条件下没有可见用例，未生成导出文件'
+            : '用例库还是空的，没有可导出的用例，未生成导出文件',
+          'error'
+        );
+        return;
+      }
+      const payload = buildExportPayload(picked, scope);
+      downloadTextFile(exportFileName(), `${JSON.stringify(payload, null, 2)}\n`);
+      state.cases = all;
+      if (state.selectedId && !all.some((item) => item.id === state.selectedId)) {
+        state.selectedId = '';
+      }
+      renderCases();
+      dom.exportModal.hidden = true;
+      showNotice(
+        `已导出 ${picked.length} 条用例（${scope === 'visible' ? '当前可见' : '全部用例'}），文件已交给浏览器下载`,
+        'success'
+      );
+    } catch (err) {
+      dom.exportError.textContent = err.message;
+      dom.exportError.hidden = false;
+    } finally {
+      state.exporting = false;
+      dom.exportCancel.disabled = false;
+      dom.exportConfirm.textContent = '开始导出';
+      updateExportConfirm();
+    }
+  }
+
+  // ---------------- 导入 ----------------
+
+  function resetImportModal() {
+    state.importData = null;
+    dom.importFile.value = '';
+    dom.importFileError.hidden = true;
+    dom.importFileError.textContent = '';
+    dom.importStepFile.hidden = false;
+    dom.importStepPreview.hidden = true;
+    dom.importConfirm.hidden = true;
+    dom.importConfirm.disabled = false;
+    dom.importConfirm.textContent = '开始导入';
+    dom.importRepick.hidden = true;
+    dom.importRepick.disabled = false;
+    dom.importCancel.disabled = false;
+  }
+
+  function openImportModal() {
+    resetImportModal();
+    dom.importModal.hidden = false;
+  }
+
+  function closeImportModal() {
+    if (state.importing) return;
+    dom.importModal.hidden = true;
+  }
+
+  function showImportFileError(message) {
+    dom.importFileError.textContent = message;
+    dom.importFileError.hidden = false;
+  }
+
+  // 从文件文本里取出用例数组：支持本平台的导出文件，也支持裸的用例数组
+  function extractImportCases(text) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      throw new Error('文件不是合法的 JSON，无法导入');
+    }
+    let cases = null;
+    if (Array.isArray(parsed)) {
+      cases = parsed;
+    } else if (parsed && typeof parsed === 'object') {
+      if (typeof parsed.kind === 'string' && parsed.kind !== 'tp55-case-export') {
+        throw new Error('这份文件不是本平台导出的用例文件，请换一份试试');
+      }
+      if (Array.isArray(parsed.cases)) cases = parsed.cases;
+    }
+    if (!cases) throw new Error('文件结构不正确：需要是用例数组，或包含 cases 数组的导出文件');
+    if (!cases.length) throw new Error('文件里没有任何用例条目');
+    if (cases.length > IMPORT_MAX_CASES) {
+      throw new Error(`一次最多导入 ${IMPORT_MAX_CASES} 条用例，这份文件有 ${cases.length} 条，请拆分后再试`);
+    }
+    return cases;
+  }
+
+  async function handleImportFile(file) {
+    dom.importFileError.hidden = true;
+    if (!file) return;
+    if (file.size > IMPORT_MAX_FILE_BYTES) {
+      showImportFileError(`文件过大（${formatBytes(file.size)}），超过 ${formatBytes(IMPORT_MAX_FILE_BYTES)} 的上限，请拆分后再导入`);
+      return;
+    }
+    let cases = null;
+    try {
+      const text = await file.text();
+      cases = extractImportCases(text);
+    } catch (err) {
+      showImportFileError(err.message);
+      return;
+    }
+    try {
+      // 逐条校验交给服务端，与保存用例走同一套规则
+      const preview = await request('/api/cases/import/preview', { method: 'POST', body: { cases } });
+      state.importData = {
+        cases,
+        items: preview.items.map((item) => ({
+          ...item,
+          action: item.status === 'duplicate' ? 'skip' : 'create',
+        })),
+      };
+      renderImportPreview(preview);
+    } catch (err) {
+      showImportFileError(err.message);
+    }
+  }
+
+  function renderImportPreview(preview) {
+    dom.importStepFile.hidden = true;
+    dom.importStepPreview.hidden = false;
+    dom.importConfirm.hidden = false;
+    dom.importRepick.hidden = false;
+    const fresh = preview.total - preview.duplicates - preview.invalid;
+    dom.importSummary.textContent = `文件共 ${preview.total} 条：可直接新建 ${fresh} 条，名称已存在 ${preview.duplicates} 条，内容不成立 ${preview.invalid} 条。`;
+    dom.importRows.textContent = '';
+    state.importData.items.forEach((item) => {
+      dom.importRows.appendChild(buildImportRow(item));
+    });
+    updateImportPlan();
+  }
+
+  function buildImportRow(item) {
+    const row = document.createElement('div');
+    row.className = 'import-row';
+
+    const main = document.createElement('div');
+    main.className = 'import-main';
+
+    const title = document.createElement('div');
+    title.className = 'import-title';
+    const tag = document.createElement('span');
+    tag.className = 'import-tag';
+    const nameNode = document.createElement('span');
+    nameNode.className = 'import-name';
+    nameNode.textContent = item.name || '（未填写名称的条目）';
+    title.append(tag, nameNode);
+    main.appendChild(title);
+
+    if (item.status === 'invalid') {
+      const errorNode = document.createElement('p');
+      errorNode.className = 'import-note bad';
+      errorNode.textContent = `内容不成立：${item.error}`;
+      main.appendChild(errorNode);
+    } else {
+      const urlNode = document.createElement('p');
+      urlNode.className = 'import-url';
+      urlNode.textContent = `${item.summary.method} ${item.summary.url}`;
+      main.appendChild(urlNode);
+      const metaNode = document.createElement('p');
+      metaNode.className = 'import-note';
+      metaNode.textContent = `请求头 ${item.summary.headerCount} 行 · 请求内容 ${item.summary.bodyLength} 字符`;
+      main.appendChild(metaNode);
+      if (item.status === 'duplicate') {
+        const dupNode = document.createElement('p');
+        dupNode.className = 'import-note';
+        dupNode.textContent = item.duplicateOf === 'existing' ? '与现有用例重名' : '与文件内前面的条目重名';
+        main.appendChild(dupNode);
+      }
+    }
+    row.appendChild(main);
+
+    // 重名条目逐条给出处理方式，选择结果立刻反映在行的标记上
+    if (item.status === 'duplicate') {
+      const actionWrap = document.createElement('div');
+      actionWrap.className = 'import-action';
+      const select = document.createElement('select');
+      select.setAttribute('aria-label', `条目「${item.name}」名称已存在，选择处理方式`);
+      [['skip', '跳过该条'], ['overwrite', '覆盖现有用例'], ['rename', '另存为新用例']].forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        select.appendChild(option);
+      });
+      select.value = item.action;
+      select.addEventListener('change', () => {
+        item.action = select.value;
+        updateImportRow(row, tag, item);
+        updateImportPlan();
+      });
+      actionWrap.appendChild(select);
+      row.appendChild(actionWrap);
+    }
+
+    updateImportRow(row, tag, item);
+    return row;
+  }
+
+  // 行的标记与底色跟随该条的状态或已选处理方式，选择结果一眼可见
+  function updateImportRow(row, tag, item) {
+    row.classList.remove('action-create', 'action-overwrite', 'action-rename', 'action-skip', 'action-invalid');
+    tag.className = 'import-tag';
+    if (item.status === 'invalid') {
+      row.classList.add('action-invalid');
+      tag.classList.add('bad');
+      tag.textContent = '不成立';
+      return;
+    }
+    if (item.status === 'new') {
+      row.classList.add('action-create');
+      tag.classList.add('new');
+      tag.textContent = '将新建';
+      return;
+    }
+    if (item.action === 'overwrite') {
+      row.classList.add('action-overwrite');
+      tag.classList.add('dup');
+      tag.textContent = '将覆盖现有';
+    } else if (item.action === 'rename') {
+      row.classList.add('action-rename');
+      tag.classList.add('rename');
+      tag.textContent = `将另存为「${item.renameTo}」`;
+    } else {
+      row.classList.add('action-skip');
+      tag.classList.add('skip');
+      tag.textContent = '将跳过';
+    }
+  }
+
+  // 预览底部的计划汇总：跟着逐条选择实时变化
+  function updateImportPlan() {
+    const items = state.importData ? state.importData.items : [];
+    const count = { create: 0, overwrite: 0, rename: 0, skip: 0, invalid: 0 };
+    items.forEach((item) => {
+      if (item.status === 'invalid') count.invalid += 1;
+      else if (item.status === 'new') count.create += 1;
+      else count[item.action] += 1;
+    });
+    const parts = [];
+    if (count.create) parts.push(`新建 ${count.create} 条`);
+    if (count.overwrite) parts.push(`覆盖 ${count.overwrite} 条`);
+    if (count.rename) parts.push(`另存 ${count.rename} 条`);
+    if (count.skip) parts.push(`跳过 ${count.skip} 条`);
+    if (count.invalid) parts.push(`${count.invalid} 条不成立不会导入`);
+    const effective = count.create + count.overwrite + count.rename;
+    dom.importPlan.textContent = effective
+      ? `按计划本次将：${parts.join('，')}。`
+      : '当前没有会导入的条目：全部跳过或内容不成立。';
+    dom.importConfirm.disabled = !effective || state.importing;
+  }
+
+  function importSummaryText(result) {
+    const parts = [];
+    if (result.created) parts.push(`新建 ${result.created} 条`);
+    if (result.overwritten) parts.push(`覆盖 ${result.overwritten} 条`);
+    if (result.renamed) parts.push(`另存 ${result.renamed} 条`);
+    if (result.skipped) parts.push(`跳过 ${result.skipped} 条`);
+    if (result.invalid) parts.push(`${result.invalid} 条未通过校验未导入`);
+    if (!result.created && !result.overwritten && !result.renamed) {
+      return `导入完成，但没有写入任何用例${parts.length ? `（${parts.join('，')}）` : ''}`;
+    }
+    return `导入完成：${parts.join('，')}`;
+  }
+
+  async function runImport() {
+    if (state.importing || !state.importData) return;
+    const items = state.importData.items
+      .filter((item) => item.status !== 'invalid')
+      .map((item) => ({
+        case: state.importData.cases[item.index],
+        action: item.status === 'new' ? 'create' : item.action,
+      }));
+    if (!items.length) return;
+
+    state.importing = true;
+    dom.importConfirm.disabled = true;
+    dom.importRepick.disabled = true;
+    dom.importCancel.disabled = true;
+    dom.importConfirm.textContent = '正在导入…';
+    try {
+      const result = await request('/api/cases/import', { method: 'POST', body: { items } });
+      dom.importModal.hidden = true;
+      state.importData = null;
+      await loadCases();
+      showNotice(importSummaryText(result), 'success');
+    } catch (err) {
+      showNotice(err.message, 'error');
+    } finally {
+      state.importing = false;
+      dom.importConfirm.disabled = false;
+      dom.importRepick.disabled = false;
+      dom.importCancel.disabled = false;
+      dom.importConfirm.textContent = '开始导入';
+    }
+  }
+
   // ---------------- 结果区小零件 ----------------
 
   function buildSection(title) {
@@ -969,6 +1415,51 @@
       state.selectedId = '';
       renderCases();
       renderEmptyDetail();
+    });
+
+    dom.caseFilter.addEventListener('input', () => {
+      state.filter = dom.caseFilter.value;
+      renderCases();
+    });
+
+    dom.exportCases.addEventListener('click', () => {
+      if (state.busy) return;
+      openExportModal();
+    });
+
+    dom.importCases.addEventListener('click', () => {
+      if (state.busy) return;
+      openImportModal();
+    });
+
+    document.querySelectorAll('input[name="export-scope"]').forEach((radio) => {
+      radio.addEventListener('change', updateExportConfirm);
+    });
+    dom.exportConfirm.addEventListener('click', runExport);
+    dom.exportCancel.addEventListener('click', closeExportModal);
+    dom.exportClose.addEventListener('click', closeExportModal);
+
+    dom.importFile.addEventListener('change', () => {
+      const file = dom.importFile.files && dom.importFile.files[0];
+      handleImportFile(file);
+    });
+    dom.importConfirm.addEventListener('click', runImport);
+    dom.importRepick.addEventListener('click', resetImportModal);
+    dom.importCancel.addEventListener('click', closeImportModal);
+    dom.importClose.addEventListener('click', closeImportModal);
+
+    // 点遮罩或按 ESC 关闭弹窗；导出、导入进行中不允许关闭
+    [dom.exportModal, dom.importModal].forEach((modal) => {
+      modal.addEventListener('click', (event) => {
+        if (event.target !== modal) return;
+        if (modal === dom.exportModal) closeExportModal();
+        else closeImportModal();
+      });
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (!dom.exportModal.hidden) closeExportModal();
+      if (!dom.importModal.hidden) closeImportModal();
     });
   }
 

@@ -8,6 +8,8 @@ const app = express();
 const PORT = process.env.PORT || 5055;
 
 // 请求内容按类型分别解析：结构化内容、纯文本与表单内容都能被内置回声接口如实回显
+// 导入接口一次可能带上整份用例文件，单独放宽解析上限，并排在通用解析之前生效
+app.use('/api/cases/import', express.json({ limit: '25mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.text({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
@@ -55,6 +57,23 @@ app.post('/api/cases', (req, res) => {
   }
 });
 
+// 导入预览：只校验与比对，不写库；确认合并才真正落库
+app.post('/api/cases/import/preview', (req, res) => {
+  try {
+    res.json(api.previewImport(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+app.post('/api/cases/import', (req, res) => {
+  try {
+    res.json(api.commitImport(req.body));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 app.delete('/api/cases/:id', (req, res) => {
   try {
     res.json(api.deleteCase(req.params.id));
@@ -84,11 +103,16 @@ function sendError(res, err) {
   });
 }
 
-// 请求体解析失败（内容不是合法 JSON）时给出明确说明
+// 请求体解析失败（内容不是合法 JSON）或超过大小上限时给出明确说明
 app.use((err, _req, res, next) => {
   if (err && err.type === 'entity.parse.failed') {
     return res.status(400).json({
       error: { code: 'BODY_INVALID_JSON', message: '请求内容不是合法的 JSON', field: '' },
+    });
+  }
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({
+      error: { code: 'BODY_TOO_LARGE', message: '提交的内容超过大小上限，请拆分后再试', field: '' },
     });
   }
   if (err) return sendError(res, err);

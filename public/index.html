@@ -107,6 +107,11 @@
             <button type="button" class="btn btn-ghost btn-small" id="refresh-cases">刷新列表</button>
           </div>
         </div>
+        <div class="case-toolbar">
+          <input id="case-filter" type="text" autocomplete="off" placeholder="按名称、地址或请求方式筛选" />
+          <button type="button" class="btn btn-small" id="export-cases">导出</button>
+          <button type="button" class="btn btn-small" id="import-cases">导入</button>
+        </div>
         <div class="case-list" id="case-list"></div>
       </section>
 
@@ -121,6 +126,58 @@
       </section>
     </div>
   </main>
+
+  <div class="modal-mask" id="export-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
+      <div class="modal-head">
+        <h3 id="export-modal-title">导出用例</h3>
+        <button type="button" class="btn btn-ghost btn-small" id="export-close">关闭</button>
+      </div>
+      <div class="modal-body">
+        <label class="radio-row">
+          <input type="radio" name="export-scope" value="all" checked />
+          <span>导出全部用例<span class="counter" id="export-all-count"></span></span>
+        </label>
+        <label class="radio-row">
+          <input type="radio" name="export-scope" value="visible" />
+          <span>只导出当前可见的用例<span class="counter" id="export-visible-count"></span></span>
+        </label>
+        <p class="field-hint" id="export-hint">导出内容为可读的 JSON 文件，包含用例名称、请求方式、目标地址、请求头与请求内容，可用于备份或导入。</p>
+        <p class="field-error" id="export-error" hidden></p>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-primary" id="export-confirm">开始导出</button>
+        <button type="button" class="btn" id="export-cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-mask" id="import-modal" hidden>
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="import-modal-title">
+      <div class="modal-head">
+        <h3 id="import-modal-title">导入用例</h3>
+        <button type="button" class="btn btn-ghost btn-small" id="import-close">关闭</button>
+      </div>
+      <div class="modal-body">
+        <div id="import-step-file">
+          <p class="modal-text">选择一份本平台导出的 JSON 文件。导入前会先在页面上预览：总共多少条、哪些名称已经存在、哪些内容不成立，确认后才会写入。</p>
+          <input type="file" id="import-file" accept=".json,application/json" />
+          <p class="field-hint">按用例名称合并：与现有用例重名的条目，可以在预览里逐条选择覆盖、跳过或另存为新用例。</p>
+          <p class="field-error" id="import-file-error" hidden></p>
+        </div>
+        <div id="import-step-preview" hidden>
+          <p class="modal-text" id="import-summary"></p>
+          <div class="import-rows" id="import-rows"></div>
+          <p class="import-plan" id="import-plan"></p>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-primary" id="import-confirm" hidden>开始导入</button>
+        <button type="button" class="btn" id="import-repick" hidden>重新选择文件</button>
+        <button type="button" class="btn" id="import-cancel">取消</button>
+      </div>
+    </div>
+  </div>
 
   <script src="./app.js"></script>
 </body>
